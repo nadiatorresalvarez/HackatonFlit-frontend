@@ -1,26 +1,22 @@
 import 'package:flutter/foundation.dart';
 
-/// Configuración de conexión con el backend TerraGuard.
 class ApiConfig {
   ApiConfig._();
 
-  /// URL base del adaptador REST (`api_server.py`).
-  ///
-  /// - Android emulador: `http://10.0.2.2:8000`
-  /// - iOS simulador / desktop / web: `http://localhost:8000`
-  /// - Dispositivo físico: IP de tu PC en la red local.
+  // URL de producción en Render.com
+  static const String _prodUrl = 'https://terraguard-arequipa.onrender.com';
+
   static String get baseUrl {
-    if (kIsWeb) return 'http://localhost:8000';
-    switch (defaultTargetPlatform) {
-      case TargetPlatform.android:
-        return 'http://10.0.2.2:8000';
-      default:
-        return 'http://localhost:8000';
+    // En web siempre usamos producción (GitHub Pages → Render)
+    if (kIsWeb) return _prodUrl;
+    // En Android emulador
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      return 'http://10.0.2.2:8000';
     }
+    // En dispositivo físico o desktop local usar producción
+    return _prodUrl;
   }
 
   static Duration get timeout => const Duration(seconds: 60);
-
-  // full-assessment incluye entrenamiento del modelo → más tiempo
   static Duration get longTimeout => const Duration(seconds: 120);
 }
