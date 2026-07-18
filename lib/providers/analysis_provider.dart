@@ -20,22 +20,22 @@ class AnalysisProvider extends ChangeNotifier {
   bool loadingMetrics = false;
   bool loadingMap = false;
   bool processing = false;
-  bool generatingReport = false;
 
   AnalysisStep step = AnalysisStep.idle;
   String? errorMessage;
-  String? reportMarkdown;
 
-  PredictionResult? lastPrediction;
+  // Resultado completo — incluye predicción + indicadores + salud + económico + reporte
+  FullAssessmentResult? lastAssessment;
+
+  // Accesos directos para no cambiar demasiado en pantallas existentes
+  PredictionResult? get lastPrediction => lastAssessment?.prediccion;
+  String? get reportMarkdown => lastAssessment?.reporteMarkdown;
+
   Uint8List? imagePreviewBytes;
   String? imageFilename;
 
   Future<void> bootstrap() async {
-    await Future.wait([
-      loadZones(),
-      loadMetrics(),
-      loadMapData(),
-    ]);
+    await Future.wait([loadZones(), loadMetrics(), loadMapData()]);
   }
 
   Future<void> loadZones() async {
@@ -57,7 +57,6 @@ class AnalysisProvider extends ChangeNotifier {
     try {
       metrics = await _api.fetchMetrics();
     } catch (_) {
-      // Métricas opcionales para la pantalla de info.
     } finally {
       loadingMetrics = false;
       notifyListeners();
@@ -72,15 +71,17 @@ class AnalysisProvider extends ChangeNotifier {
       mapFocos = data.focos;
       mapPuntos = data.puntos;
     } catch (_) {
-      // El mapa puede mostrar solo focos estáticos si falla.
     } finally {
       loadingMap = false;
       notifyListeners();
     }
   }
 
-  Future<PredictionResult?> runAnalysis({
-    required String zona,
+  /// Ejecuta el análisis completo en una sola llamada a /api/full-assessment.
+  /// Si hay imagen seleccionada la analiza primero con /api/analyze-image.
+  /// [zona] es opcional cuando se proporcionan [lat] y [lon] (auto-detect GPS).
+  Future<FullAssessmentResult?> runAnalysis({
+    String? zona,
     required double ph,
     required double clorosisManual,
     required double necrosisManual,
@@ -91,14 +92,14 @@ class AnalysisProvider extends ChangeNotifier {
     processing = true;
     step = AnalysisStep.analyzingImage;
     errorMessage = null;
-    reportMarkdown = null;
+    lastAssessment = null;
     notifyListeners();
 
     try {
       double clorosis = clorosisManual;
       double necrosis = necrosisManual;
-      String? visionMsg;
 
+      // Paso 1 — análisis de imagen si hay foto
       if (!useManualSymptoms && imagePreviewBytes != null) {
         final vision = await _api.analyzeImage(
           bytes: imagePreviewBytes!,
@@ -106,60 +107,30 @@ class AnalysisProvider extends ChangeNotifier {
         );
         clorosis = vision.clorosisPct;
         necrosis = vision.necrosisPct;
-        visionMsg = vision.msg;
-        if (!vision.ok) {
-          visionMsg = '${vision.msg} (valores estimados)';
-        }
       }
 
+      // Paso 2 — evaluación completa (predicción + salud + económico + reporte)
       step = AnalysisStep.predicting;
       notifyListeners();
 
-      final prediction = await _api.predict(
-        zona: zona,
+      final result = await _api.fullAssessment(
         ph: ph,
         clorosisPct: clorosis,
         necrosisPct: necrosis,
+        zona: zona,
         lat: lat,
         lon: lon,
-        visionMsg: visionMsg,
       );
 
-      lastPrediction = prediction;
+      lastAssessment = result;
       step = AnalysisStep.done;
-      return prediction;
+      return result;
     } catch (e) {
       step = AnalysisStep.error;
       errorMessage = e.toString();
       return null;
     } finally {
       processing = false;
-      notifyListeners();
-    }
-  }
-
-  Future<String?> createReport({
-    PredictionResult? prediction,
-    String? apiKey,
-  }) async {
-    final target = prediction ?? lastPrediction;
-    if (target == null) return null;
-
-    generatingReport = true;
-    errorMessage = null;
-    notifyListeners();
-
-    try {
-      reportMarkdown = await _api.generateReport(
-        prediction: target,
-        apiKey: apiKey,
-      );
-      return reportMarkdown;
-    } catch (e) {
-      errorMessage = e.toString();
-      return null;
-    } finally {
-      generatingReport = false;
       notifyListeners();
     }
   }
@@ -173,7 +144,7 @@ class AnalysisProvider extends ChangeNotifier {
   void resetAnalysisFlow() {
     step = AnalysisStep.idle;
     errorMessage = null;
-    reportMarkdown = null;
+    lastAssessment = null;
     notifyListeners();
   }
 }

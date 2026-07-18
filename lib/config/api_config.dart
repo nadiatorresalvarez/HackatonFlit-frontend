@@ -20,4 +20,7 @@ class ApiConfig {
   }
 
   static Duration get timeout => const Duration(seconds: 60);
+
+  // full-assessment incluye entrenamiento del modelo → más tiempo
+  static Duration get longTimeout => const Duration(seconds: 120);
 }

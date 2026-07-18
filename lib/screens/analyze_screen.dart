@@ -13,7 +13,6 @@ import 'results_screen.dart';
 
 class AnalyzeScreen extends StatefulWidget {
   const AnalyzeScreen({super.key, this.embedInShell = false});
-
   final bool embedInShell;
 
   @override
@@ -34,6 +33,9 @@ class _AnalyzeScreenState extends State<AnalyzeScreen> {
   String? _locationLabel;
   bool _locating = false;
 
+  // Con GPS activo la zona es opcional — el backend la auto-detecta
+  bool get _zoneRequired => !(_useGps && _lat != null && _lon != null);
+
   @override
   void initState() {
     super.initState();
@@ -48,10 +50,7 @@ class _AnalyzeScreenState extends State<AnalyzeScreen> {
     if (file == null || !mounted) return;
     final bytes = await file.readAsBytes();
     if (!mounted) return;
-    context.read<AnalysisProvider>().setImage(
-          bytes,
-          filename: file.name,
-        );
+    context.read<AnalysisProvider>().setImage(bytes, filename: file.name);
     setState(() => _useManualSymptoms = false);
   }
 
@@ -65,27 +64,25 @@ class _AnalyzeScreenState extends State<AnalyzeScreen> {
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Permiso de ubicación denegado. Se usará la zona seleccionada.'),
-          ),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Permiso de ubicación denegado — se usará la zona seleccionada.'),
+        ));
         setState(() {
           _useGps = false;
-          _lat = null;
-          _lon = null;
+          _lat = _lon = null;
           _locationLabel = null;
         });
         return;
       }
-
-      final position = await Geolocator.getCurrentPosition();
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+      );
       if (!mounted) return;
       setState(() {
-        _lat = position.latitude;
-        _lon = position.longitude;
+        _lat = pos.latitude;
+        _lon = pos.longitude;
         _locationLabel =
-            '${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)}';
+            '${pos.latitude.toStringAsFixed(4)}°, ${pos.longitude.toStringAsFixed(4)}°';
       });
     } catch (e) {
       if (!mounted) return;
@@ -100,37 +97,39 @@ class _AnalyzeScreenState extends State<AnalyzeScreen> {
 
   Future<void> _submit() async {
     final provider = context.read<AnalysisProvider>();
-    final zona = _selectedZone;
-    if (zona == null) {
+
+    // Validación: necesita zona O GPS
+    if (_zoneRequired && _selectedZone == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Selecciona una zona de riesgo.')),
+        const SnackBar(content: Text('Selecciona una zona o activa el GPS.')),
       );
       return;
     }
 
     if (!_useManualSymptoms && provider.imagePreviewBytes == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Sube una foto o activa el modo manual de síntomas.'),
-        ),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Sube una foto o activa el modo manual de síntomas.'),
+      ));
       return;
     }
 
     if (!mounted) return;
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => ProcessingScreen(
-          stepLabel: provider.imagePreviewBytes != null && !_useManualSymptoms
-              ? 'Analizando imagen con visión artificial...'
-              : 'Calculando riesgo con el modelo...',
-          subtitle: 'Conectando con el backend TerraGuard',
-        ),
+
+    final label = provider.imagePreviewBytes != null && !_useManualSymptoms
+        ? 'Analizando imagen con visión artificial...'
+        : 'Calculando riesgo con el modelo...';
+
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => ProcessingScreen(
+        stepLabel: label,
+        subtitle: _useGps && _lat != null
+            ? 'GPS: $_locationLabel → detectando zona automáticamente'
+            : 'Zona: ${_selectedZone ?? "—"}',
       ),
-    );
+    ));
 
     final result = await provider.runAnalysis(
-      zona: zona,
+      zona: _zoneRequired ? _selectedZone : null,
       ph: _ph,
       clorosisManual: _clorosisManual,
       necrosisManual: _necrosisManual,
@@ -140,14 +139,12 @@ class _AnalyzeScreenState extends State<AnalyzeScreen> {
     );
 
     if (!mounted) return;
-    Navigator.of(context).pop();
+    Navigator.of(context).pop(); // quita ProcessingScreen
 
     if (result != null) {
-      await Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ResultsScreen(prediction: result),
-        ),
-      );
+      await Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => ResultsScreen(assessment: result),
+      ));
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(provider.errorMessage ?? 'Error desconocido')),
@@ -157,78 +154,42 @@ class _AnalyzeScreenState extends State<AnalyzeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final provider = watchProvider(context);
+    final provider = context.watch<AnalysisProvider>();
     final theme = Theme.of(context);
     final zones = provider.zones;
     _selectedZone ??= zones.isNotEmpty ? zones.first.nombre : null;
+    final gpsActive = _useGps && _lat != null;
 
     return Scaffold(
-      appBar: widget.embedInShell
-          ? null
-          : AppBar(
-              title: const Text('Analizar hoja'),
-            ),
+      appBar: widget.embedInShell ? null : AppBar(title: const Text('Analizar')),
       body: provider.loadingZones && zones.isEmpty
           ? const Center(child: CircularProgressIndicator())
           : ListView(
               padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
               children: [
+                // ── Zona / GPS ──────────────────────────────────────────────
                 const SectionHeader(
-                  title: 'Datos de la parcela',
-                  subtitle: 'Zona, pH del suelo y ubicación opcional.',
-                  icon: Icons.agriculture_outlined,
+                  title: 'Ubicación de la parcela',
+                  subtitle: 'Usa GPS para detección automática de zona o selecciona manualmente.',
+                  icon: Icons.place_outlined,
                 ),
-                const SizedBox(height: 16),
-                DropdownButtonFormField<String>(
-                  value: _selectedZone,
-                  decoration: const InputDecoration(
-                    labelText: 'Zona / foco de riesgo',
-                  ),
-                  items: zones
-                      .map(
-                        (RiskZone z) => DropdownMenuItem(
-                          value: z.nombre,
-                          child: Text(z.nombre, overflow: TextOverflow.ellipsis),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (value) => setState(() => _selectedZone = value),
-                ),
-                if (_selectedZone != null) ...[
-                  const SizedBox(height: 12),
-                  Builder(
-                    builder: (context) {
-                      final zone = zones.firstWhere((z) => z.nombre == _selectedZone);
-                      return Card(
-                        child: ListTile(
-                          leading: Icon(
-                            Icons.science_outlined,
-                            color: theme.colorScheme.primary,
-                          ),
-                          title: Text('Metal de interés: ${zone.metal}'),
-                          subtitle: Text(
-                            'Referencia: ${zone.distKm.toStringAsFixed(1)} km al foco',
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                ],
-                const SizedBox(height: 16),
-                Text('pH del suelo: ${_ph.toStringAsFixed(1)}'),
-                Slider(
-                  value: _ph,
-                  min: 4,
-                  max: 9,
-                  divisions: 50,
-                  label: _ph.toStringAsFixed(1),
-                  onChanged: (v) => setState(() => _ph = v),
-                ),
+                const SizedBox(height: 12),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
                   title: const Text('Usar mi ubicación GPS'),
                   subtitle: Text(
-                    _locationLabel ?? 'Calcula distancia real al foco minero',
+                    gpsActive
+                        ? '📍 $_locationLabel — zona se detectará automáticamente'
+                        : _locating
+                            ? 'Obteniendo ubicación...'
+                            : 'Calcula distancia real al foco minero más cercano',
+                    style: TextStyle(
+                      color: gpsActive
+                          ? theme.colorScheme.primary
+                          : theme.colorScheme.onSurfaceVariant,
+                      fontWeight:
+                          gpsActive ? FontWeight.w600 : FontWeight.normal,
+                    ),
                   ),
                   value: _useGps,
                   onChanged: _locating
@@ -238,40 +199,138 @@ class _AnalyzeScreenState extends State<AnalyzeScreen> {
                           if (value) await _fetchLocation();
                         },
                 ),
+                if (!gpsActive) ...[
+                  const SizedBox(height: 8),
+                  DropdownButtonFormField<String>(
+                    value: _selectedZone,
+                    decoration: const InputDecoration(
+                      labelText: 'Zona / foco de riesgo (fallback sin GPS)',
+                    ),
+                    items: zones
+                        .map((RiskZone z) => DropdownMenuItem(
+                              value: z.nombre,
+                              child: Text(z.nombre,
+                                  overflow: TextOverflow.ellipsis),
+                            ))
+                        .toList(),
+                    onChanged: (v) => setState(() => _selectedZone = v),
+                  ),
+                  if (_selectedZone != null && zones.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Builder(builder: (context) {
+                      final zone =
+                          zones.firstWhere((z) => z.nombre == _selectedZone,
+                              orElse: () => zones.first);
+                      return Card(
+                        child: ListTile(
+                          leading: Icon(Icons.science_outlined,
+                              color: theme.colorScheme.primary),
+                          title: Text('Metal: ${zone.metal}'),
+                          subtitle: Text(
+                            zone.contaminantes.isNotEmpty
+                                ? 'Contaminantes: ${zone.contaminantes.join(", ")}'
+                                : 'Ref: ${zone.distKm.toStringAsFixed(1)} km al foco',
+                          ),
+                          trailing: zone.descripcion != null
+                              ? Tooltip(
+                                  message: zone.descripcion!,
+                                  child: const Icon(Icons.info_outline,
+                                      size: 18),
+                                )
+                              : null,
+                        ),
+                      );
+                    }),
+                  ],
+                ] else ...[
+                  const SizedBox(height: 4),
+                  Card(
+                    color: theme.colorScheme.primaryContainer,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 10),
+                      child: Row(
+                        children: [
+                          Icon(Icons.gps_fixed,
+                              color: theme.colorScheme.primary, size: 18),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'La zona minera más cercana se detectará automáticamente.',
+                              style: TextStyle(
+                                color: theme.colorScheme.onPrimaryContainer,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+
+                // ── pH ──────────────────────────────────────────────────────
+                const SizedBox(height: 16),
+                const SectionHeader(
+                  title: 'Parámetros del suelo',
+                  icon: Icons.agriculture_outlined,
+                ),
                 const SizedBox(height: 8),
+                Text('pH del suelo: ${_ph.toStringAsFixed(1)}'),
+                Slider(
+                  value: _ph,
+                  min: 4,
+                  max: 9,
+                  divisions: 50,
+                  label: _ph.toStringAsFixed(1),
+                  onChanged: (v) => setState(() => _ph = v),
+                ),
+                Text(
+                  _ph > 7.5
+                      ? '⚠️ pH alcalino — mayor movilidad del arsénico'
+                      : _ph < 6.2
+                          ? '⚠️ pH ácido — mayor movilidad de Cu/Pb/Zn'
+                          : '✅ pH neutro — movilidad moderada',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: (_ph > 7.5 || _ph < 6.2)
+                        ? theme.colorScheme.error
+                        : theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+
+                // ── Foto ────────────────────────────────────────────────────
+                const SizedBox(height: 20),
                 const SectionHeader(
                   title: 'Foto de la hoja',
-                  subtitle: 'OpenCV estimará clorosis y necrosis automáticamente.',
+                  subtitle: 'OpenCV (ExG+HSV+CIELAB) estima clorosis y necrosis automáticamente.',
                   icon: Icons.eco_outlined,
                 ),
                 const SizedBox(height: 12),
                 _PhotoPreview(bytes: provider.imagePreviewBytes),
                 const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: () => _pickImage(ImageSource.gallery),
-                        icon: const Icon(Icons.photo_library_outlined),
-                        label: const Text('Galería'),
-                      ),
+                Row(children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => _pickImage(ImageSource.gallery),
+                      icon: const Icon(Icons.photo_library_outlined),
+                      label: const Text('Galería'),
                     ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: () => _pickImage(ImageSource.camera),
-                        icon: const Icon(Icons.photo_camera_outlined),
-                        label: const Text('Cámara'),
-                      ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => _pickImage(ImageSource.camera),
+                      icon: const Icon(Icons.photo_camera_outlined),
+                      label: const Text('Cámara'),
                     ),
-                  ],
-                ),
+                  ),
+                ]),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
-                  title: const Text('Ajustar síntomas manualmente'),
+                  title: const Text('Síntomas manuales'),
                   subtitle: const Text('Útil si no hay foto disponible'),
                   value: _useManualSymptoms,
-                  onChanged: (value) => setState(() => _useManualSymptoms = value),
+                  onChanged: (v) => setState(() => _useManualSymptoms = v),
                 ),
                 if (_useManualSymptoms) ...[
                   Text('Clorosis: ${_clorosisManual.round()}%'),
@@ -291,24 +350,30 @@ class _AnalyzeScreenState extends State<AnalyzeScreen> {
                     onChanged: (v) => setState(() => _necrosisManual = v),
                   ),
                 ],
-                const SizedBox(height: 20),
+
+                // ── Botón ───────────────────────────────────────────────────
+                const SizedBox(height: 24),
                 FilledButton.icon(
                   onPressed: provider.processing ? null : _submit,
                   icon: const Icon(Icons.play_arrow_rounded),
-                  label: const Text('Iniciar análisis'),
+                  label: const Text('Iniciar análisis completo'),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Incluye predicción · indicadores · riesgo de salud · impacto económico · reporte',
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
                 ),
               ],
             ),
     );
   }
-
-  AnalysisProvider watchProvider(BuildContext context) =>
-      context.watch<AnalysisProvider>();
 }
 
 class _PhotoPreview extends StatelessWidget {
   const _PhotoPreview({this.bytes});
-
   final Uint8List? bytes;
 
   @override
@@ -327,18 +392,13 @@ class _PhotoPreview extends StatelessWidget {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(
-                      Icons.image_outlined,
-                      size: 42,
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
+                    Icon(Icons.image_outlined,
+                        size: 42,
+                        color: theme.colorScheme.onSurfaceVariant),
                     const SizedBox(height: 8),
-                    Text(
-                      'Sin imagen seleccionada',
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
+                    Text('Sin imagen seleccionada',
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant)),
                   ],
                 ),
               )
