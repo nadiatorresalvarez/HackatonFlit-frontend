@@ -51,5 +51,18 @@
 	<string>Se necesita acceso a fotos para analizar hojas del cultivo.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Se usa la ubicación para calcular la distancia al foco minero más cercano.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>localhost</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
 </dict>
 </plist>
